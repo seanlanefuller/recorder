@@ -1,0 +1,488 @@
+<!DOCTYPE html>
+<html lang="en">
+
+<head>
+    <meta charset="UTF-8">
+    <title>Audio Recorder</title>
+
+    <style>
+        body {
+            background: #121212;
+            color: #ddd;
+            font-family: system-ui, sans-serif;
+            display: flex;
+            justify-content: center;
+            align-items: center;
+            height: 100vh;
+        }
+
+        #panel {
+            background: #1e1e1e;
+            padding: 16px;
+            border-radius: 12px;
+            box-shadow: 0 12px 40px rgba(0, 0, 0, .6);
+            width: 460px;
+        }
+
+        #transport {
+            display: flex;
+            gap: 6px;
+            align-items: center;
+            justify-content: center;
+            margin-bottom: 8px;
+        }
+
+        button {
+            background: #333;
+            color: #ddd;
+            border: none;
+            padding: 6px 10px;
+            cursor: pointer;
+        }
+
+        button:hover {
+            background: #444;
+        }
+
+        #indicator {
+            display: flex;
+            gap: 6px;
+        }
+
+        .dot {
+            width: 10px;
+            height: 10px;
+            border-radius: 50%;
+            background: #444;
+        }
+
+        .dot.playing {
+            background: #00ff66;
+        }
+
+        .dot.recording {
+            background: #ff4444;
+        }
+
+        #info {
+            font-size: 13px;
+            text-align: center;
+            margin-bottom: 6px;
+        }
+
+        canvas {
+            width: 400px;
+            height: 100px;
+            border: 1px solid #666;
+            background: #181818;
+            display: block;
+            margin: auto;
+            cursor: pointer;
+        }
+
+        #scroll {
+            width: 400px;
+            display: block;
+            margin: 6px auto;
+        }
+
+        #filebar {
+            display: flex;
+            justify-content: center;
+            gap: 8px;
+            margin-top: 6px;
+        }
+
+        #footer {
+            text-align: center;
+            align-items: bottom;
+        }
+
+        .footer {
+            text-align: center;
+            padding: 12px;
+            font-size: 13px;
+            color: #888;
+        }
+
+        .footer {
+            margin-top: auto;
+            text-align: center;
+            color: #777;
+        }
+    </style>
+</head>
+
+<body>
+    <div id="panel">
+
+        <div id="transport">
+            <button id="power">OFF</button>
+            <button id="start">⏮</button>
+            <button id="play">▶</button>
+            <button id="record">●</button>
+            <button id="stop">■</button>
+            <button id="erase">Erase</button>
+            <button id="end">⏭</button>
+
+            <div id="indicator">
+                <div id="playDot" class="dot"></div>
+                <div id="recDot" class="dot"></div>
+            </div>
+        </div>
+
+        <div id="info">
+            <span id="pos">0.00 s</span> /
+            <span id="len">0.00 s</span>
+        </div>
+
+        <canvas id="wave" width="400" height="100"></canvas>
+        <input id="scroll" type="range" min="0" max="0" step="0.001" value="0">
+
+        <div id="filebar">
+            <input type="file" id="load" accept=".wav">
+            <button id="save">Save</button>
+        </div>
+
+        <div class="footer">
+            © 2026 Sean Lane Fuller
+        </div>
+    </div>
+
+
+    <script>
+        /* ---------- constants ---------- */
+        const WIDTH = 400;
+        const HEIGHT = 100;
+        const WINDOW_SECONDS = 2;
+
+        /* ---------- audio ---------- */
+        const audioCtx = new AudioContext();
+        const sampleRate = audioCtx.sampleRate;
+
+        let buffer = audioCtx.createBuffer(1, 1, sampleRate);
+        let playhead = 0;
+        let playheadBase = 0;
+        let windowStart = 0;
+
+        let source = null;
+        let isPlaying = false;
+        let isRecording = false;
+
+        let mediaStream, input, processor;
+        let startTime = 0;
+
+        /* ---------- ui ---------- */
+        const canvas = document.getElementById("wave");
+        const ctx = canvas.getContext("2d");
+        const scroll = document.getElementById("scroll");
+
+        const playDot = document.getElementById("playDot");
+        const recDot = document.getElementById("recDot");
+        const posLabel = document.getElementById("pos");
+        const lenLabel = document.getElementById("len");
+
+        /* ---------- helpers ---------- */
+        const winSamples = () => Math.floor(WINDOW_SECONDS * sampleRate);
+        const sToT = s => (s / sampleRate).toFixed(2);
+
+        function updateIndicators() {
+            playDot.className = "dot" + (isPlaying ? " playing" : "");
+            recDot.className = "dot" + (isRecording ? " recording" : "");
+        }
+
+        function updateLabels() {
+            posLabel.textContent = sToT(playhead) + " s";
+            lenLabel.textContent = sToT(buffer.length) + " s";
+        }
+
+        function updateScrollRange() {
+            scroll.max = Math.max(0, (buffer.length - winSamples()) / sampleRate);
+            scroll.value = windowStart / sampleRate;
+        }
+
+        /* ---------- drawing ---------- */
+        function draw() {
+            ctx.clearRect(0, 0, WIDTH, HEIGHT);
+            ctx.fillStyle = "#181818";
+            ctx.fillRect(0, 0, WIDTH, HEIGHT);
+
+            const data = buffer.getChannelData(0);
+            const start = Math.floor(windowStart);
+            const win = winSamples();
+            const spp = win / WIDTH;
+
+            /* zero line */
+            ctx.strokeStyle = "#333";
+            ctx.beginPath();
+            ctx.moveTo(0, HEIGHT / 2);
+            ctx.lineTo(WIDTH, HEIGHT / 2);
+            ctx.stroke();
+
+            /* tick lines */
+            ctx.strokeStyle = "#222";
+            for (let t = 0; t <= WINDOW_SECONDS; t += 0.1) {
+                const x = t / WINDOW_SECONDS * WIDTH;
+                ctx.beginPath();
+                ctx.moveTo(x, 0);
+                ctx.lineTo(x, HEIGHT);
+                ctx.stroke();
+            }
+
+            /* waveform */
+            ctx.strokeStyle = "#4fb3ff";
+            ctx.beginPath();
+            for (let x = 0; x < WIDTH; x++) {
+                const base = Math.floor(start + x * spp);
+                let min = 1, max = -1;
+                for (let i = 0; i < spp; i++) {
+                    const v = data[base + i] || 0;
+                    min = Math.min(min, v);
+                    max = Math.max(max, v);
+                }
+                ctx.moveTo(x, (1 + min) * HEIGHT / 2);
+                ctx.lineTo(x, (1 + max) * HEIGHT / 2);
+            }
+            ctx.stroke();
+
+            /* playhead */
+            const px = (playhead - start) / win * WIDTH;
+            ctx.strokeStyle = "#ff7a18";
+            ctx.beginPath();
+            ctx.moveTo(px, 0);
+            ctx.lineTo(px, HEIGHT);
+            ctx.stroke();
+
+            updateLabels();
+            updateScrollRange();
+        }
+
+        /* ---------- scrolling ---------- */
+        function followPlayhead() {
+            const win = winSamples();
+            if (playhead < windowStart || playhead > windowStart + win) {
+                windowStart = Math.max(0, playhead - win / 2);
+            }
+        }
+
+        /* ---------- playback ---------- */
+        function play() {
+            if (isPlaying) return;
+            audioCtx.resume();
+
+            source = audioCtx.createBufferSource();
+            source.buffer = buffer;
+            source.connect(audioCtx.destination);
+            source.start(0, playhead / sampleRate);
+
+            playheadBase = playhead;
+            startTime = audioCtx.currentTime;
+            isPlaying = true;
+            updateIndicators();
+
+            source.onended = stopAll;
+            tick();
+        }
+
+        function tick() {
+            if (!isPlaying) return;
+
+            playhead =
+                playheadBase +
+                Math.floor((audioCtx.currentTime - startTime) * sampleRate);
+
+            if (playhead >= buffer.length) {
+                playhead = buffer.length;
+                stopAll();
+                return;
+            }
+
+            followPlayhead();
+            draw();
+            requestAnimationFrame(tick);
+        }
+
+        /* ---------- recording ---------- */
+        async function record() {
+            if (isRecording) return;
+            audioCtx.resume();
+
+            if (!mediaStream) {
+                mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+                input = audioCtx.createMediaStreamSource(mediaStream);
+                processor = audioCtx.createScriptProcessor(4096, 1, 1);
+                input.connect(processor);
+                processor.connect(audioCtx.destination);
+
+                processor.onaudioprocess = e => {
+                    if (!isRecording) return;
+                    const inputData = e.inputBuffer.getChannelData(0);
+                    const needed = playhead + inputData.length;
+
+                    if (needed > buffer.length) {
+                        const nb = audioCtx.createBuffer(1, needed, sampleRate);
+                        nb.getChannelData(0).set(buffer.getChannelData(0));
+                        buffer = nb;
+                    }
+
+                    buffer.getChannelData(0).set(inputData, playhead);
+                    playhead += inputData.length;
+
+                    followPlayhead();
+                    draw();
+                };
+            }
+
+            isRecording = true;
+            updateIndicators();
+        }
+
+        /* ---------- stop / erase ---------- */
+        function stopAll() {
+            if (source) {
+                try { source.stop(); } catch { }
+                source = null;
+            }
+            isPlaying = false;
+            isRecording = false;
+            updateIndicators();
+        }
+
+        function erase() {
+            stopAll();
+            buffer = audioCtx.createBuffer(1, 1, sampleRate);
+            playhead = 0;
+            windowStart = 0;
+            draw();
+        }
+
+        /* ---------- interactions ---------- */
+        canvas.addEventListener("mousedown", e => {
+            const r = canvas.getBoundingClientRect();
+            const x = e.clientX - r.left;
+            playhead = Math.floor(windowStart + x / WIDTH * winSamples());
+            draw();
+        });
+
+        scroll.addEventListener("input", e => {
+            windowStart = parseFloat(e.target.value) * sampleRate;
+            playhead = Math.floor(windowStart + winSamples() / 2);
+            draw();
+        });
+
+        /* ---------- wav save/load ---------- */
+        function audioBufferToWav(buf) {
+            const data = buf.getChannelData(0);
+            const bytes = new ArrayBuffer(44 + data.length * 2);
+            const view = new DataView(bytes);
+
+            const write = (o, s) => [...s].forEach((c, i) => view.setUint8(o + i, c.charCodeAt(0)));
+
+            write(0, "RIFF");
+            view.setUint32(4, 36 + data.length * 2, true);
+            write(8, "WAVEfmt ");
+            view.setUint32(16, 16, true);
+            view.setUint16(20, 1, true);
+            view.setUint16(22, 1, true);
+            view.setUint32(24, sampleRate, true);
+            view.setUint32(28, sampleRate * 2, true);
+            view.setUint16(32, 2, true);
+            view.setUint16(34, 16, true);
+            write(36, "data");
+            view.setUint32(40, data.length * 2, true);
+
+            let o = 44;
+            for (let i = 0; i < data.length; i++, o += 2) {
+                const s = Math.max(-1, Math.min(1, data[i]));
+                view.setInt16(o, s * 0x7fff, true);
+            }
+            return bytes;
+        }
+
+        document.getElementById("save").onclick = () => {
+            const blob = new Blob([audioBufferToWav(buffer)], { type: "audio/wav" });
+            const a = document.createElement("a");
+            a.href = URL.createObjectURL(blob);
+            a.download = "recording.wav";
+            a.click();
+        };
+
+        document.getElementById("load").onchange = async e => {
+            const file = e.target.files[0];
+            if (!file) return;
+            const ab = await file.arrayBuffer();
+            buffer = await audioCtx.decodeAudioData(ab);
+            playhead = 0;
+            windowStart = 0;
+            draw();
+        };
+
+        /* ---------- transport ---------- */
+        document.getElementById("play").onclick = play;
+        document.getElementById("record").onclick = record;
+        document.getElementById("stop").onclick = stopAll;
+        document.getElementById("erase").onclick = erase;
+
+        document.getElementById("power").onclick = async () => {
+            try {
+                // Resume AudioContext
+                await audioCtx.resume();
+
+                // Request microphone access (user gesture required)
+                if (!mediaStream) {
+                    mediaStream = await navigator.mediaDevices.getUserMedia({ audio: true });
+
+                    // Set up the input and processor for recording
+                    input = audioCtx.createMediaStreamSource(mediaStream);
+                    processor = audioCtx.createScriptProcessor(4096, 1, 1);
+                    input.connect(processor);
+                    processor.connect(audioCtx.destination);
+
+                    processor.onaudioprocess = e => {
+                        if (!isRecording) return;
+                        const inputData = e.inputBuffer.getChannelData(0);
+                        const needed = playhead + inputData.length;
+
+                        if (needed > buffer.length) {
+                            const nb = audioCtx.createBuffer(1, needed, sampleRate);
+                            nb.getChannelData(0).set(buffer.getChannelData(0));
+                            buffer = nb;
+                        }
+
+                        buffer.getChannelData(0).set(inputData, playhead);
+                        playhead += inputData.length;
+
+                        followPlayhead();
+                        draw();
+                    };
+                }
+
+                // Update UI
+                updateIndicators();
+                document.getElementById("power").textContent = "ON";
+
+            } catch (err) {
+                console.warn("Microphone access denied or dismissed:", err);
+                document.getElementById("power").textContent = "OFF";
+            }
+        };
+
+        document.getElementById("start").onclick = () => {
+            playhead = 0;
+            windowStart = 0;
+            draw();
+        };
+
+        document.getElementById("end").onclick = () => {
+            playhead = buffer.length;
+            windowStart = Math.max(0, buffer.length - winSamples());
+            draw();
+        };
+
+        /* ---------- init ---------- */
+        draw();
+        updateIndicators();
+    </script>
+</body>
+
+</html>
